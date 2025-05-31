@@ -1,5 +1,5 @@
 @echo off
-py setup.py build_ext --inplace
+python "%~dp0setup.py" build_ext --inplace
 
 
 pause

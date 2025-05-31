@@ -361,7 +361,8 @@ class KPFCNN(nn.Module):
         target = target.unsqueeze(0)
 
         # Cross entropy loss
-        self.output_loss = self.criterion(outputs, target)
+        self.output_loss = self.criterion(outputs, target.long())
+
 
         # Regularization of deformable offsets
         if self.deform_fitting_mode == 'point2point':
