@@ -59,7 +59,7 @@ class S3DISConfig(Config):
     dataset_task = ''
 
     # Number of CPU threads for the input pipeline
-    input_threads = 10
+    input_threads = 0
 
     #########################
     # Architecture definition
@@ -165,7 +165,7 @@ class S3DISConfig(Config):
     #####################
 
     # Maximal number of epochs
-    max_epoch = 500
+    max_epoch = 5
 
     # Learning rate management
     learning_rate = 1e-2
@@ -288,7 +288,7 @@ if __name__ == '__main__':
                              collate_fn=S3DISCollate,
                              num_workers=config.input_threads,
                              pin_memory=True)
-
+    print("config.input_threads = {}".format(config.input_threads))
     # Calibrate samplers
     training_sampler.calibration(training_loader, verbose=True)
     test_sampler.calibration(test_loader, verbose=True)

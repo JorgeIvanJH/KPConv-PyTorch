@@ -59,7 +59,7 @@ class Config:
     in_radius = 1.0
 
     # Number of CPU threads for the input pipeline
-    input_threads = 8
+    input_threads = 0
 
     ##################
     # Model parameters
