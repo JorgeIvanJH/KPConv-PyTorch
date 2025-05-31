@@ -34,6 +34,7 @@ from datasets.S3DIS import *
 from datasets.SensatUrban import *
 from datasets.SemanticKitti import *
 from datasets.Toronto3D import *
+from datasets.MiniMarket import *
 from torch.utils.data import DataLoader
 
 from utils.config import Config
@@ -97,7 +98,7 @@ if __name__ == '__main__':
     #       > 'last_XXX': Automatically retrieve the last trained model on dataset XXX
     #       > '(old_)results/Log_YYYY-MM-DD_HH-MM-SS': Directly provide the path of a trained model
 
-    chosen_log = 'results/Log_2024-05-14_21-04-36'
+    chosen_log = ''
 
     # Choose the index of the checkpoint to load OR None if you want to load the current checkpoint
     chkp_idx = -1
@@ -184,6 +185,10 @@ if __name__ == '__main__':
         test_dataset = SemanticKittiDataset(config, set=set, balance_classes=False)
         test_sampler = SemanticKittiSampler(test_dataset)
         collate_fn = SemanticKittiCollate
+    elif config.dataset == 'MiniMarket':
+        test_dataset = MiniMarketDataset(config, train=False)
+        test_sampler = MiniMarketSampler(test_dataset, use_potential=False)
+        collate_fn = MiniMarketCollate
     else:
         raise ValueError('Unsupported dataset : ' + config.dataset)
 
