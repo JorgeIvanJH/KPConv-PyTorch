@@ -52,11 +52,38 @@ from utils.config import bcolors
 
 
 class S3DISDataset(PointCloudDataset):
-    """Class to handle S3DIS dataset."""
+    """
+    PyTorch-compatible dataset class for handling the Stanford Large-Scale 3D Indoor Spaces (S3DIS) dataset.
 
+    This dataset class is designed for cloud segmentation tasks. It loads and preprocesses the full point clouds
+    into memory, supports potential-based and random sampling strategies, and is compatible with multiprocessing
+    during training.
+
+    Attributes:
+        label_to_names (dict): Maps class indices to semantic labels.
+        ignored_labels (np.array): Labels to be ignored during training (can be empty).
+        path (str): Root path to the dataset on disk.
+        dataset_task (str): The type of task, e.g., 'cloud_segmentation'.
+        set (str): One of ['training', 'validation', 'test', 'ERF'].
+        use_potentials (bool): Whether to use potential-based sampling.
+        epoch_n (int): Number of models used per epoch.
+        files (List[str]): List of .ply files corresponding to the chosen split.
+        input_trees, input_colors, input_labels: Data containers for point cloud information.
+        pot_trees: KD-Trees used for potential sampling.
+        potentials, min_potentials, argmin_potentials: Structures for potential-based sampling.
+        batch_limit (torch.Tensor): Max number of points per batch.
+        epoch_inds, epoch_i: Epoch sampling management structures.
+        worker_lock (Lock): Lock object for controlling parallel sampling.
+    """
     def __init__(self, config, set='training', use_potentials=True, load_data=True):
         """
-        This dataset is small enough to be stored in-memory, so load all point clouds here
+        Initialize the S3DIS dataset object.
+
+        Args:
+            config (object): Configuration object containing dataset parameters.
+            set (str): One of ['training', 'validation', 'test', 'ERF'] determining the dataset split.
+            use_potentials (bool): Whether to use potentials for sampling strategy.
+            load_data (bool): If False, skips loading the point cloud data.
         """
         PointCloudDataset.__init__(self, 'S3DIS')
 
@@ -136,7 +163,7 @@ class S3DISDataset(PointCloudDataset):
         ################
         # Load ply files
         ################
-
+        
         # List of training files
         self.files = []
         for i, f in enumerate(self.cloud_names):
@@ -158,6 +185,7 @@ class S3DISDataset(PointCloudDataset):
 
         if 0 < self.config.first_subsampling_dl <= 0.01:
             raise ValueError('subsampling_parameter too low (should be over 1 cm')
+
 
         # Initiate containers
         self.input_trees = []
@@ -240,7 +268,51 @@ class S3DISDataset(PointCloudDataset):
             return self.random_item(batch_i)
 
     def potential_item(self, batch_i, debug_workers=False):
+        """
+        Generate one training or validation batch based on point potentials for S3DIS segmentation.
 
+        This method selects input spheres (regions) from the dataset by choosing center points with the
+        lowest accumulated sampling 'potential'. It uses a spatial KD-tree to retrieve neighboring points
+        within a radius of each center. Potentials are updated after each sampling to ensure spatial 
+        coverage and avoid oversampling dense areas. The process continues until the batch point count
+        exceeds a configured threshold.
+
+        Parameters
+        ----------
+        batch_i : int
+            Index of the batch (not directly used but can be used for tracking or debugging).
+        
+        debug_workers : bool, optional
+            If True, prints visual indicators of worker states for debugging multiprocessing behavior.
+            (Default: False)
+
+        Returns
+        -------
+        tuple
+            A tuple containing the following lists, each representing part of the batch:
+            - p_list : list of np.ndarray
+                Centered input points (shape [N_i, 3]) for each input region.
+            - f_list : list of np.ndarray
+                Features of each point (e.g., RGB + height) (shape [N_i, F]).
+            - l_list : list of np.ndarray
+                Ground truth labels per point in each region.
+            - pi_list : list of np.ndarray
+                Indices of selected points in the original point cloud.
+            - i_list : list of int
+                Indices of center points used to define each region.
+            - ci_list : list of int
+                Cloud indices from which each region was sampled.
+            - s_list : list of float
+                Scaling factors applied during augmentation for each region.
+            - R_list : list of np.ndarray
+                Rotation matrices applied during augmentation.
+
+        Raises
+        ------
+        ValueError
+            If repeated attempts (100×batch size) to sample non-empty spheres fail, suggesting that the
+            point cloud may be too sparse or incorrectly processed.
+        """
         t = [time.time()]
 
         # Initiate concatanation lists
@@ -505,7 +577,46 @@ class S3DISDataset(PointCloudDataset):
         return input_list
 
     def random_item(self, batch_i):
+        """
+        Generate one training or validation batch using predefined random sampling indices.
 
+        This method retrieves input spheres (regions of points) based on pre-shuffled epoch indices.
+        For each center point, it gathers neighboring points within a given radius using a KD-tree,
+        applies optional data and color augmentations, and assembles them into a batch. Sampling 
+        continues until the number of collected points exceeds the configured batch limit.
+
+        Parameters
+        ----------
+        batch_i : int
+            Index of the batch (not directly used but may serve for debugging or tracking).
+
+        Returns
+        -------
+        tuple
+            A tuple containing the following lists, each representing a component of the batch:
+            - p_list : list of np.ndarray
+                Centered input points for each region (shape [N_i, 3]).
+            - f_list : list of np.ndarray
+                Input features for each point (e.g., color + height) (shape [N_i, F]).
+            - l_list : list of np.ndarray
+                Ground truth labels for each point in the region.
+            - pi_list : list of np.ndarray
+                Indices of selected points in the original point cloud.
+            - i_list : list of int
+                Indices of the selected center points in the point clouds.
+            - ci_list : list of int
+                Indices of the clouds from which regions are sampled.
+            - s_list : list of float
+                Scale factors applied during data augmentation.
+            - R_list : list of np.ndarray
+                Rotation matrices applied during data augmentation.
+
+        Raises
+        ------
+        ValueError
+            If repeated attempts (100×batch size) fail to sample non-empty regions, possibly due to 
+            sparsity or preprocessing issues in the dataset.
+        """
         # Initiate concatanation lists
         p_list = []
         f_list = []
@@ -643,7 +754,29 @@ class S3DISDataset(PointCloudDataset):
         return input_list
 
     def prepare_S3DIS_ply(self):
+        """
+        Aggregates and converts raw room-level annotated point cloud data from the S3DIS dataset into unified PLY files per area.
 
+        This method processes each area (e.g., 'Area_1', 'Area_2', ...) by:
+        1. Iterating through its subfolders (rooms).
+        2. Reading all `.txt` annotation files that contain XYZRGB and class label information.
+        3. Mapping each object to a semantic class using `self.name_to_label`.
+        4. Stacking all room-level points, colors, and class labels into single arrays.
+        5. Writing the aggregated data into a `.ply` file with fields ['x', 'y', 'z', 'red', 'green', 'blue', 'class'].
+
+        The generated `.ply` files are saved to:
+            {self.path}/{self.train_path}/{Area_X}.ply
+
+        This is a one-time preprocessing step and is skipped for any area where the `.ply` file already exists.
+
+        Notes:
+            - If the raw `.txt` files contain malformed or non-ASCII characters (a known S3DIS issue), the method attempts to fix them automatically with regex.
+            - 'stairs' is mapped to the 'clutter' class to ensure compatibility with the label schema.
+
+        Raises:
+            ValueError: If an object label is unknown and cannot be mapped to a valid class.
+            Warning: If non-standard characters are found in the `.txt` files and require correction.
+        """
         print('\nPreparing ply files')
         t0 = time.time()
 
@@ -724,7 +857,33 @@ class S3DISDataset(PointCloudDataset):
         return
 
     def load_subsampled_clouds(self):
+        """
+        Load or generate subsampled point cloud data and associated KD-Trees for the S3DIS dataset.
 
+        This method performs the following tasks:
+        1. For each scene (PLY file) in the dataset:
+        - Loads precomputed subsampled clouds and KD-Trees if available.
+        - Otherwise, reads the raw PLY file, applies voxel-based grid subsampling to reduce point count,
+            builds a KD-Tree on the subsampled cloud, and saves both the tree and subsampled data to disk.
+        2. Stores point positions, colors, and labels into `self.input_trees`, `self.input_colors`, and `self.input_labels`.
+        3. If `use_potentials` is enabled:
+        - Computes an additional coarsely subsampled KD-Tree for each cloud to be used in potential-based sampling.
+        - These coarse KD-Trees are stored in `self.pot_trees`.
+
+        The subsampling is controlled by `self.config.first_subsampling_dl` (fine) and `self.config.in_radius / 10` (coarse).
+
+        Raises:
+            FileNotFoundError: If a required PLY file is missing and cannot be read.
+            ValueError: If subsampling parameters are misconfigured.
+
+        Side Effects:
+            - Creates directories and writes `.pkl` and `.ply` files under `input_{dl}/` if not already present.
+            - Populates in-memory data structures needed for fast sampling and batch creation.
+
+        Notes:
+            - Uses `grid_subsampling` for downsampling.
+            - Uses `KDTree` from `sklearn.neighbors` for fast nearest-neighbor search.
+        """
         # Parameter
         dl = self.config.first_subsampling_dl
 
@@ -748,7 +907,7 @@ class S3DISDataset(PointCloudDataset):
             # Name of the input files
             KDTree_file = join(tree_path, '{:s}_KDTree.pkl'.format(cloud_name))
             sub_ply_file = join(tree_path, '{:s}.ply'.format(cloud_name))
-
+            print("KDTree_file:", KDTree_file)
             # Check if inputs have already been computed
             if exists(KDTree_file):
                 print('\nFound KDTree for cloud {:s}, subsampled at {:.3f}'.format(cloud_name, dl))
@@ -915,7 +1074,29 @@ class S3DISDataset(PointCloudDataset):
 
 
 class S3DISSampler(Sampler):
-    """Sampler for S3DIS"""
+    """
+    Sampler for the S3DIS dataset used in point cloud segmentation.
+
+    This sampler determines how to select regions (spheres) from the dataset to feed into the network for training or validation.
+    It ensures that regions are sampled in a way that balances class representation and covers the dataset efficiently.
+
+    The behavior depends on the `use_potentials` flag:
+    - If `use_potentials=True`: region centers are chosen based on potentials (handled elsewhere).
+    - If `use_potentials=False`: this sampler selects fixed numbers of regions per class, aiming for balanced sampling.
+
+    Parameters
+    ----------
+    dataset : S3DISDataset
+        The dataset to sample from. The sampler holds a reference to it (no deep copy).
+
+    Attributes
+    ----------
+    dataset : S3DISDataset
+        Reference to the dataset for sampling labels and point cloud metadata.
+
+    N : int
+        Number of steps (batches) per epoch, set depending on whether this is training or validation.
+    """
 
     def __init__(self, dataset: S3DISDataset):
         Sampler.__init__(self, dataset)
@@ -933,8 +1114,19 @@ class S3DISSampler(Sampler):
 
     def __iter__(self):
         """
-        Yield next batch indices here. In this dataset, this is a dummy sampler that yield the index of batch element
-        (input sphere) in epoch instead of the list of point indices
+        Generate the indices for each training or validation batch.
+
+        If `use_potentials` is False, this method:
+        - Randomly selects a set of point indices across all clouds.
+        - Ensures balanced representation by choosing approximately the same number of samples per class.
+        - Stores the selected indices in `dataset.epoch_inds`.
+
+        Then, yields one index per step, which is used by the dataset to fetch the corresponding region (sphere).
+
+        Yields
+        ------
+        int
+            A batch index (used internally to index `epoch_inds`).
         """
 
         if not self.dataset.use_potentials:
@@ -1010,10 +1202,33 @@ class S3DISSampler(Sampler):
 
     def fast_calib(self):
         """
-        This method calibrates the batch sizes while ensuring the potentials are well initialized. Indeed on a dataset
-        like Semantic3D, before potential have been updated over the dataset, there are cahnces that all the dense area
-        are picked in the begining and in the end, we will have very large batch of small point clouds
-        :return:
+        Quickly calibrate the batch size (`batch_limit`) to match the desired average number of samples per batch.
+
+        This method performs a lightweight calibration loop using a Proportional (P) controller to adjust the 
+        number of points allowed per batch (`dataset.batch_limit`). It is designed for faster convergence than 
+        the full calibration routine, and is especially useful in datasets like Semantic3D where:
+        
+        - Point cloud densities vary significantly.
+        - Early samples may all come from dense regions, leading to misleading batch size estimates.
+        - Potentials have not yet been updated across the dataset, increasing the chance of selecting biased samples.
+
+        The method ensures that the average batch size converges toward the configured target 
+        (`dataset.config.batch_num`), using a low-pass filter and error smoothing to detect convergence.
+
+        Returns
+        -------
+        None
+
+        Side Effects
+        ------------
+        - Modifies `self.dataset.batch_limit` in-place to achieve stable batch size behavior.
+        - Displays progress information during calibration.
+        - Stops when the estimated batch size (`estim_b`) converges to the target.
+
+        Notes
+        -----
+        - This calibration is approximate but much faster than the full `calibration()` method.
+        - Best used at the beginning of training, especially on large-scale datasets with uneven point distributions.
         """
 
         # Estimated average batch size and target value
@@ -1087,11 +1302,57 @@ class S3DISSampler(Sampler):
 
     def calibration(self, dataloader, untouched_ratio=0.9, verbose=False, force_redo=False):
         """
-        Method performing batch and neighbors calibration.
-            Batch calibration: Set "batch_limit" (the maximum number of points allowed in every batch) so that the
-                               average batch size (number of stacked pointclouds) is the one asked.
-        Neighbors calibration: Set the "neighborhood_limits" (the maximum number of neighbors allowed in convolutions)
-                               so that 90% of the neighborhoods remain untouched. There is a limit for each layer.
+        Perform automatic calibration of batch size and neighborhood limits for point cloud processing.
+
+        This method tunes two key parameters needed for efficient and stable training of KPConv-based networks:
+
+        1. Batch Calibration:
+        - Adjusts the `batch_limit` (maximum number of points per batch) using a PID control loop.
+        - The goal is to ensure that the average number of stacked point clouds (i.e., spheres/regions) 
+            in each batch reaches a target value set by `config.batch_num`.
+
+        2. Neighborhood Calibration:
+        - Computes per-layer `neighborhood_limits`, which restrict the number of neighbors considered
+            during convolution at each layer.
+        - These limits are set so that at least `untouched_ratio` (default: 90%) of neighborhoods are 
+            unaffected (i.e., not clipped).
+
+        Cached values are reused if available unless `force_redo=True` is specified.
+
+        Parameters
+        ----------
+        dataloader : DataLoader
+            PyTorch DataLoader used to iterate over the training dataset during calibration.
+        
+        untouched_ratio : float, optional (default: 0.9)
+            The percentage of neighborhoods that should remain untouched by the neighbor limit cutoff.
+
+        verbose : bool, optional (default: False)
+            If True, prints detailed status information during the calibration process.
+
+        force_redo : bool, optional (default: False)
+            If True, ignores cached calibration results and recalibrates from scratch.
+
+        Returns
+        -------
+        None
+
+        Side Effects
+        ------------
+        - Sets `self.dataset.batch_limit` to a calibrated value.
+        - Sets `self.dataset.neighborhood_limits`, a list of per-layer limits for neighborhood sizes.
+        - Stores calibration results in 'batch_limits.pkl' and 'neighbors_limits.pkl' for reuse.
+        - May raise an exception or show plots if convergence is not reached (for debugging).
+
+        Raises
+        ------
+        ValueError
+            If calibration fails to converge or cannot collect valid data (e.g., all input spheres are empty).
+
+        Notes
+        -----
+        - This step is essential before training to ensure stable GPU memory usage and efficient neighborhood lookup.
+        - It should be run after any significant change to point cloud sampling radius, subsampling, or batch size.
         """
 
         ##############################
