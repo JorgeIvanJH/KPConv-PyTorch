@@ -486,7 +486,9 @@ class ModelTrainer:
             lengths = batch.lengths[0].cpu().numpy()
             in_inds = batch.input_inds.cpu().numpy()
             cloud_inds = batch.cloud_inds.cpu().numpy()
-            torch.cuda.synchronize(self.device)
+            if 'cuda' in self.device.type:
+                torch.cuda.synchronize(config.device)
+
 
             # Get predictions and labels per instance
             # ***************************************

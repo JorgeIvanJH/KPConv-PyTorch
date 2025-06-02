@@ -56,7 +56,7 @@ class MiniMarketConfig(Config):
     dataset = 'MiniMarket'
 
     # Number of classes in the dataset (This value is overwritten by dataset class when Initializating dataset).
-    num_classes = 2
+    num_classes = None
 
     # Type of task performed on this dataset (also overwritten)
     dataset_task = ''
@@ -100,14 +100,17 @@ class MiniMarketConfig(Config):
     # Number of kernel points
     num_kernel_points = 15
 
-    # Size of the first subsampling grid in meter
-    first_subsampling_dl = 0.02
+    # Radius of the input sphere (decrease value to reduce memory cost)
+    in_radius = 1.2
+
+    # Size of the first subsampling grid in meter (increase value to reduce memory cost)
+    first_subsampling_dl = 0.03
 
     # Radius of convolution in "number grid cell". (2.5 is the standard value)
     conv_radius = 2.5
 
     # Radius of deformable convolution in "number grid cell". Larger so that deformed kernel can spread out
-    deform_radius = 6.0
+    deform_radius = 5.0
 
     # Radius of the area of influence of each kernel point in "number grid cell". (1.0 is the standard value)
     KP_extent = 1.2
@@ -119,14 +122,15 @@ class MiniMarketConfig(Config):
     aggregation_mode = 'sum'
 
     # Choice of input features
-    in_features_dim = 1
+    first_features_dim = 128
+    in_features_dim = 5
 
     # Can the network learn modulations
-    modulated = True
+    modulated = False
 
     # Batch normalization parameters
     use_batch_norm = True
-    batch_norm_momentum = 0.05
+    batch_norm_momentum = 0.02
 
     # Deformable offset loss
     # 'point2point' fitting geometry by penalizing distance from deform point to input points
@@ -141,22 +145,22 @@ class MiniMarketConfig(Config):
     #####################
 
     # Maximal number of epochs
-    max_epoch = 500
+    max_epoch = 5
 
     # Learning rate management
     learning_rate = 1e-2
     momentum = 0.98
-    lr_decays = {i: 0.1**(1/100) for i in range(1, max_epoch)}
+    lr_decays = {i: 0.1 ** (1 / 150) for i in range(1, max_epoch)}
     grad_clip_norm = 100.0
 
-    # Number of batch
-    batch_num = 10
+    # Number of batch (decrease to reduce memory cost, but it should remain > 3 for stability)
+    batch_num = 4
 
     # Number of steps per epochs
-    epoch_steps = 300
+    epoch_steps = 10
 
     # Number of validation examples per epoch
-    validation_size = 30
+    validation_size = 50
 
     # Number of epoch between each checkpoint
     checkpoint_gap = 50
@@ -244,9 +248,8 @@ if __name__ == '__main__':
         config.saving_path = sys.argv[1]
 
     # Initialize datasets
-    h5_path = r"D:\Datasets\MinimarketPointCloud\MiniMarket_point_clouds\64\segmentation_dataset\ketchup_heinz_400ml_segmentation_date_20250526_time_160358_numPoints_64_maxObjects_10_numOrientations_1.h5"
-    training_dataset = MiniMarketDataset(config, set='training', use_potentials=True,h5_path=h5_path)
-    test_dataset = MiniMarketDataset(config, set='validation', use_potentials=True,h5_path=h5_path)
+    training_dataset = MiniMarketDataset(config, set='training', use_potentials=True)
+    test_dataset = MiniMarketDataset(config, set='validation', use_potentials=True)
 
     # Initialize samplers
     training_sampler = MiniMarketSampler(training_dataset)
@@ -266,22 +269,36 @@ if __name__ == '__main__':
                             collate_fn=MiniMarketCollate,
                             num_workers=config.input_threads,
                             pin_memory=True)
-
+    print("config.input_threads = {}".format(config.input_threads))
     # Calibrate samplers
-    training_sampler.calibration(training_loader)
-    test_sampler.calibration(test_loader)
+    training_sampler.calibration(training_loader, verbose=True)
+    test_sampler.calibration(test_loader, verbose=True)
 
-    #debug_timing(test_dataset, test_sampler, test_loader)
-    #debug_show_clouds(training_dataset, training_sampler, training_loader)
+    # Optional debug functions
+    # debug_timing(training_dataset, training_loader)
+    # debug_timing(test_dataset, test_loader)
+    # debug_upsampling(training_dataset, training_loader)
 
     print('\nModel Preparation')
     print('*****************')
 
     # Define network model
     t1 = time.time()
-    net = KPFCNN(config,
-             training_dataset.label_values,
-             training_dataset.ignored_labels)
+    print("training_dataset.label_values:", training_dataset.label_values)
+    print("training_dataset.ignored_labels:", training_dataset.ignored_labels)
+    net = KPFCNN(config, training_dataset.label_values, training_dataset.ignored_labels)
+
+    debug = False
+    if debug:
+        print('\n*************************************\n')
+        print(net)
+        print('\n*************************************\n')
+        for param in net.parameters():
+            if param.requires_grad:
+                print(param.shape)
+        print('\n*************************************\n')
+        print("Model size %i" % sum(param.numel() for param in net.parameters() if param.requires_grad))
+        print('\n*************************************\n')
 
     # Define a trainer class
     trainer = ModelTrainer(net, config, chkp_path=chosen_chkp)
@@ -289,13 +306,8 @@ if __name__ == '__main__':
 
     print('\nStart training')
     print('**************')
-
     # Training
-    # try:
     trainer.train(net, training_loader, test_loader, config)
-    # except:
-    #     print('Caught an error')
-    #     os.kill(os.getpid(), signal.SIGINT)
 
     print('Forcing exit now')
     os.kill(os.getpid(), signal.SIGINT)
